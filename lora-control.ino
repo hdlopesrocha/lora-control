@@ -10,7 +10,7 @@
 #include <ESP32Time.h>
 #include <List.hpp>
 
-#define SERVER 1
+//#define SERVER 1
 #define INVERT_RELAY 1
 
 #define SCK 5    // GPIO5  -- SCK
@@ -51,6 +51,11 @@ typedef struct {
 } CalendarEvent;
 
 typedef struct {
+  uint8_t index;
+  CalendarEvent event;
+} EventMessage;
+
+typedef struct {
   char nodeId[32];    //check RFC 7986
   char deviceId[32];  //check RFC 7986
   long captcha;
@@ -87,9 +92,9 @@ unsigned int counter = 0;
 ESP32Time rtc(3600);  // offset in seconds GMT+1
 Adafruit_SSD1306 display(OLED_RESET);
 #ifdef SERVER
-const char *nodeId = "Node1A";
+const char *nodeId = "Server";
 #else
-const char *nodeId = "Node2A";
+const char *nodeId = "Node1A";
 #endif
 
 String secret = "fseCxV7BeM";
@@ -190,120 +195,119 @@ void handleFileUploadTask(void *parameter) {
   uint8_t *data = filePart->data;
   size_t len = filePart->len;
   bool isFinal = filePart->isFinal;
-  if (xSemaphoreTake(calendarEventsMutex, portMAX_DELAY)) {
 
-    if (!index) {
-      Serial.printf("UploadStart: %s\n", filename);
-      cleanCalendarEvents();
-      line = 0;
+  if (!index) {
+    Serial.printf("UploadStart: %s\n", filename);
+    cleanCalendarEvents();
+    line = 0;
+  }
+
+  Serial.printf("handleFileUpload %d %d %s\n", index, len, isFinal ? "true" : "false");
+
+  for (int i = 0; i < len; ++i) {
+    ignoreCurrentChar = false;
+    char c = data[i];
+    if (c == '\n') {
+      ignoreCurrentChar = true;
+    } else if (c == ' ' && wasNewLine) {
+      ignoreCurrentChar = true;
+    } else if (wasNewLine) {
+      fileLineIndex = 0;
     }
 
-    Serial.printf("handleFileUpload %d %d %s\n", index, len, isFinal ? "true" : "false");
-
-    for (int i = 0; i < len; ++i) {
-      ignoreCurrentChar = false;
-      char c = data[i];
-      if (c == '\n') {
-        ignoreCurrentChar = true;
-      } else if (c == ' ' && wasNewLine) {
-        ignoreCurrentChar = true;
-      } else if (wasNewLine) {
-        fileLineIndex = 0;
-      }
-
-      if (c == '\n') {
-        fileLine[fileLineIndex] = '\0';
-        // Serial.printf("%d\t%s\n", ++line,fileLine);
-        if (startsWith(fileLine, "BEGIN:VEVENT")) {
-          Serial.printf("Created instance of CalendarEvent(sizeOf=%d)... ", sizeof(CalendarEvent));
-          calendarEvent = new CalendarEvent();
-          strcpy(calendarEvent->uid, "no-uid");
-          strcpy(calendarEvent->nodeId, "no-node");
-          strcpy(calendarEvent->deviceId, "no-device");
-          calendarEvent->repeat = 0l;
-          calendarEvent->start = 0l;
-          calendarEvent->end = 0l;
-          calendarEvent->count = 0;
-          calendarEvent->interval = 1;
-          calendarEvent->onGoing = false;
-          Serial.printf("Ok!\n");
-        } else if (startsWith(fileLine, "END:VEVENT") && calendarEvent != NULL) {
-          Serial.printf("Event(uid=%s,node=%s,device=%s,start=%jd,end=%jd,freq=%d,repeat=%jd,count=%d,interval=%d)\n", calendarEvent->uid, calendarEvent->nodeId, calendarEvent->deviceId, calendarEvent->start, calendarEvent->end, calendarEvent->freq, calendarEvent->repeat, calendarEvent->count, calendarEvent->interval);
-
+    if (c == '\n') {
+      fileLine[fileLineIndex] = '\0';
+      // Serial.printf("%d\t%s\n", ++line,fileLine);
+      if (startsWith(fileLine, "BEGIN:VEVENT")) {
+        Serial.printf("Created instance of CalendarEvent(sizeOf=%d)... ", sizeof(CalendarEvent));
+        calendarEvent = new CalendarEvent();
+        strcpy(calendarEvent->uid, "no-uid");
+        strcpy(calendarEvent->nodeId, "no-node");
+        strcpy(calendarEvent->deviceId, "no-device");
+        calendarEvent->repeat = 0l;
+        calendarEvent->start = 0l;
+        calendarEvent->end = 0l;
+        calendarEvent->count = 0;
+        calendarEvent->interval = 1;
+        calendarEvent->onGoing = false;
+        Serial.printf("Ok!\n");
+      } else if (startsWith(fileLine, "END:VEVENT") && calendarEvent != NULL) {
+        Serial.printf("Event(uid=%s,node=%s,device=%s,start=%jd,end=%jd,freq=%d,repeat=%jd,count=%d,interval=%d)\n", calendarEvent->uid, calendarEvent->nodeId, calendarEvent->deviceId, calendarEvent->start, calendarEvent->end, calendarEvent->freq, calendarEvent->repeat, calendarEvent->count, calendarEvent->interval);
+        if (xSemaphoreTake(calendarEventsMutex, portMAX_DELAY)) {
           calendarEvents.add(calendarEvent);
           calendarEvent = NULL;
-        } else if (startsWith(fileLine, "UID") && calendarEvent != NULL) {
-          strcpy(calendarEvent->uid, advanceToChar(fileLine, ':'));
-        } else if (startsWith(fileLine, "DTSTART") && calendarEvent != NULL) {
-          calendarEvent->start = getTimeFromString(advanceToChar(fileLine, ':'));
-        } else if (startsWith(fileLine, "DTEND") && calendarEvent != NULL) {
-          calendarEvent->end = getTimeFromString(advanceToChar(fileLine, ':'));
-        } else if (startsWith(fileLine, "LOCATION") && calendarEvent != NULL) {
-          char *value = advanceToChar(fileLine, ':');
-          char *nodeStr = strstr(value, "NODE=");
-          char *deviceStr = strstr(value, "DEVICE=");
-          Serial.printf("value=%s\n", value);
-
-          replace_char(value, ';', ' ');
-
-          if (nodeStr != NULL) {
-            sscanf(nodeStr, "NODE=%s", calendarEvent->nodeId);  //TODO: Fix did has everything, now it can't contain spaces
-            Serial.printf("node=%s\n", calendarEvent->nodeId);
-          }
-          if (deviceStr != NULL) {
-            sscanf(deviceStr, "DEVICE=%s", calendarEvent->deviceId);  //TODO: Fix did has everything, now it can't contain spaces
-            Serial.printf("device=%s\n", calendarEvent->deviceId);
-          }
-        } else if (startsWith(fileLine, "RRULE") && calendarEvent != NULL) {
-          char *value = advanceToChar(fileLine, ':');
-          char *freqStr = strstr(value, "FREQ=");
-          char *countStr = strstr(value, "COUNT=");
-          char *intervalStr = strstr(value, "INTERVAL=");
-
-          if (countStr != NULL) {
-            sscanf(countStr, "COUNT=%d%s", &calendarEvent->count, TEMP_CHARS);
-          }
-          if (intervalStr != NULL) {
-            sscanf(intervalStr, "INTERVAL=%d%s", &calendarEvent->interval, TEMP_CHARS);
-          }
-          if (freqStr != NULL) {
-            if (startsWith(freqStr, "FREQ=MINUTELY") != NULL) {
-              calendarEvent->freq = CalendarRepeatFreq::MINUTELY;
-              calendarEvent->repeat = 60;
-            }
-            if (startsWith(freqStr, "FREQ=HOURLY") != NULL) {
-              calendarEvent->freq = CalendarRepeatFreq::HOURLY;
-              calendarEvent->repeat = 60 * 60l;
-            }
-            if (startsWith(freqStr, "FREQ=DAILY") != NULL) {
-              calendarEvent->freq = CalendarRepeatFreq::DAILY;
-              calendarEvent->repeat = 60 * 60 * 24l;
-            }
-            if (startsWith(freqStr, "FREQ=WEEKLY") != NULL) {
-              calendarEvent->freq = CalendarRepeatFreq::WEEKLY;
-              calendarEvent->repeat = 60 * 60 * 24 * 7l;
-            }
-          }
-          //Serial.printf("value=%s\n", value);
         }
-      }
-      if (!ignoreCurrentChar) {
-        fileLine[fileLineIndex++] = c;
-        if (fileLineIndex >= FILE_LINE_SIZE) {
-          Serial.printf("ERROR: line++ access error!");
-        }
-      }
+        xSemaphoreGive(calendarEventsMutex);
+      } else if (startsWith(fileLine, "UID") && calendarEvent != NULL) {
+        strcpy(calendarEvent->uid, advanceToChar(fileLine, ':'));
+      } else if (startsWith(fileLine, "DTSTART") && calendarEvent != NULL) {
+        calendarEvent->start = getTimeFromString(advanceToChar(fileLine, ':'));
+      } else if (startsWith(fileLine, "DTEND") && calendarEvent != NULL) {
+        calendarEvent->end = getTimeFromString(advanceToChar(fileLine, ':'));
+      } else if (startsWith(fileLine, "LOCATION") && calendarEvent != NULL) {
+        char *value = advanceToChar(fileLine, ':');
+        char *nodeStr = strstr(value, "NODE=");
+        char *deviceStr = strstr(value, "DEVICE=");
+        Serial.printf("value=%s\n", value);
 
-      if (c == '\n') {
-        wasNewLine = true;
-      } else {
-        wasNewLine = false;
+        replace_char(value, ';', ' ');
+
+        if (nodeStr != NULL) {
+          sscanf(nodeStr, "NODE=%s", calendarEvent->nodeId);  //TODO: Fix did has everything, now it can't contain spaces
+          Serial.printf("node=%s\n", calendarEvent->nodeId);
+        }
+        if (deviceStr != NULL) {
+          sscanf(deviceStr, "DEVICE=%s", calendarEvent->deviceId);  //TODO: Fix did has everything, now it can't contain spaces
+          Serial.printf("device=%s\n", calendarEvent->deviceId);
+        }
+      } else if (startsWith(fileLine, "RRULE") && calendarEvent != NULL) {
+        char *value = advanceToChar(fileLine, ':');
+        char *freqStr = strstr(value, "FREQ=");
+        char *countStr = strstr(value, "COUNT=");
+        char *intervalStr = strstr(value, "INTERVAL=");
+
+        if (countStr != NULL) {
+          sscanf(countStr, "COUNT=%d%s", &calendarEvent->count, TEMP_CHARS);
+        }
+        if (intervalStr != NULL) {
+          sscanf(intervalStr, "INTERVAL=%d%s", &calendarEvent->interval, TEMP_CHARS);
+        }
+        if (freqStr != NULL) {
+          if (startsWith(freqStr, "FREQ=MINUTELY") != NULL) {
+            calendarEvent->freq = CalendarRepeatFreq::MINUTELY;
+            calendarEvent->repeat = 60;
+          }
+          if (startsWith(freqStr, "FREQ=HOURLY") != NULL) {
+            calendarEvent->freq = CalendarRepeatFreq::HOURLY;
+            calendarEvent->repeat = 60 * 60l;
+          }
+          if (startsWith(freqStr, "FREQ=DAILY") != NULL) {
+            calendarEvent->freq = CalendarRepeatFreq::DAILY;
+            calendarEvent->repeat = 60 * 60 * 24l;
+          }
+          if (startsWith(freqStr, "FREQ=WEEKLY") != NULL) {
+            calendarEvent->freq = CalendarRepeatFreq::WEEKLY;
+            calendarEvent->repeat = 60 * 60 * 24 * 7l;
+          }
+        }
+        //Serial.printf("value=%s\n", value);
       }
     }
-    xSemaphoreGive(calendarEventsMutex);
-  } else {
-    Serial.printf("Error: mutex take!\n");
+    if (!ignoreCurrentChar) {
+      fileLine[fileLineIndex++] = c;
+      if (fileLineIndex >= FILE_LINE_SIZE) {
+        Serial.printf("ERROR: line++ access error!");
+      }
+    }
+
+    if (c == '\n') {
+      wasNewLine = true;
+    } else {
+      wasNewLine = false;
+    }
   }
+  pingEventsTask();
+
   free(filePart->data);
   free(filePart);
   vTaskDelete(NULL);
@@ -345,6 +349,11 @@ char *getStringFromEnum(CalendarRepeatFreq freq) {
     case CalendarRepeatFreq::WEEKLY: return "WEEKLY";
     default: return "-";
   }
+}
+
+void handleBroadcastEvents(AsyncWebServerRequest *request) {
+  pingEventsTask();
+  request->redirect("/");
 }
 
 void handleRoot(AsyncWebServerRequest *request) {
@@ -462,13 +471,14 @@ void handleRoot(AsyncWebServerRequest *request) {
 
 
 
-      html += "<tr><td>" + String(event->onGoing ? "RUNNING" : "WAITING")+ "</td><td>" + String(event->uid) + "</td><td>" + String(event->nodeId) + "</td><td>" + String(event->deviceId) + "</td><td>" + String(startStr) + "</td><td>" + String(endStr) + "</td><td>" + String(getStringFromEnum(event->freq)) + "</td><td>" + String(event->interval) + "</td><td>" + String(event->repeat) + "</td><td>" + String(stripStart) + "</td><td>" + String(stripEnd) + "</td><td>" + String(stripTime) + "</td></tr>";
+      html += "<tr><td>" + String(event->onGoing ? "RUNNING" : "WAITING") + "</td><td>" + String(event->uid) + "</td><td>" + String(event->nodeId) + "</td><td>" + String(event->deviceId) + "</td><td>" + String(startStr) + "</td><td>" + String(endStr) + "</td><td>" + String(getStringFromEnum(event->freq)) + "</td><td>" + String(event->interval) + "</td><td>" + String(event->repeat) + "</td><td>" + String(stripStart) + "</td><td>" + String(stripEnd) + "</td><td>" + String(stripTime) + "</td></tr>";
     }
     html += "</table>";
+    html += "<a href=\"/broadcast\"><button>Broadcast events</button></a>";
   }
 
 
- 
+
 
 
 
@@ -619,17 +629,22 @@ void messageTask(void *parameter) {
         }
 
       } else if (type == MESSAGE_TYPE_EVENT) {
+        EventMessage message;
+
         CalendarEvent *event = (CalendarEvent *)malloc(sizeof(CalendarEvent));
         int index = packet[1];
         if (index == 0) {
           cleanCalendarEvents();
         }
         Serial.printf("LoRa Event %d\n", index);
-        memcpy(event, packet + 2, sizeof(CalendarEvent));
+        memcpy(&message, packet + 1, sizeof(EventMessage));
+        memcpy(event, &message.event, sizeof(CalendarEvent));
 
         Serial.printf("\tEvent %s\n", event->uid);
-
-        calendarEvents.add(event);
+        if (xSemaphoreTake(calendarEventsMutex, portMAX_DELAY)) {
+          calendarEvents.add(event);
+        }
+        xSemaphoreGive(calendarEventsMutex);
       }
     } else {
       Serial.println("ERROR: Signature failed!");
@@ -638,11 +653,6 @@ void messageTask(void *parameter) {
   free(packet);
   vTaskDelete(NULL);
 }
-
-typedef struct {
-  uint8_t index;
-  uint8_t event[sizeof(CalendarEvent)];
-} EventMessage;
 
 void pingEventsTask() {
   if (xSemaphoreTake(calendarEventsMutex, portMAX_DELAY)) {
@@ -653,7 +663,7 @@ void pingEventsTask() {
       LoRa.write(MESSAGE_TYPE_EVENT);
       EventMessage message;
       message.index = (uint8_t)i;
-      memcpy(message.event, event, sizeof(CalendarEvent));
+      message.event = *event;
 
       LoRa.write((uint8_t *)&message, sizeof(EventMessage));
 
@@ -707,7 +717,9 @@ void pingTask(void *parameter) {
     LoRa.write(messageBytes, messageLength);
     LoRa.write(shaResult, 32);
     LoRa.endPacket();
+#ifdef SERVER
     pingEventsTask();
+#endif
     LoRa.receive();
 
     free(messageBytes);
@@ -765,7 +777,6 @@ void eventSchedulerTask(void *parameter) {
 
     if (xSemaphoreTake(calendarEventsMutex, portMAX_DELAY)) {
       int numberOfEvents = calendarEvents.getSize();
-      List<char *> devicesRunningCurrently;
 
       for (int i = 0; i < numberOfEvents; ++i) {
         CalendarEvent *event = (CalendarEvent *)calendarEvents.get(i);
@@ -778,36 +789,36 @@ void eventSchedulerTask(void *parameter) {
         time_t stripEnd = (event->end - event->start) % loopLength;
         Serial.printf("strip(start=%jd,end=%jd,time=%jd,len=%ld,cycles=%ld)\n", stripStart, stripEnd, stripTime, loopLength, cyclesSinceStart);
 
-        event->onGoing = false;
-        if (strcmp(nodeId, event->nodeId) == 0) {
-          bool evaluation = (stripStart <= stripTime && stripTime < stripEnd) && (event->count == 0 || cyclesSinceStart < event->count);
-          event->onGoing = evaluation;
-        }
+        bool evaluation = (stripStart <= stripTime && stripTime < stripEnd) && (event->count == 0 || cyclesSinceStart < event->count);
+        event->onGoing = evaluation;
         //Serial.printf("location(nodeId=%s,deviceId=%s)\n", event->nodeId, event->deviceId);
       }
-      for (int i = 0; i < devicesRunningCurrently.getSize(); ++i) {
-        char *value = (char *)devicesRunningCurrently.get(i);
-        setLocalState(String(value), true);
-      }
+
 
 
       int numberOfNodes = nodeInfo.getSize();
       for (int i = 0; i < numberOfNodes; ++i) {
         NodeInfo *node = (NodeInfo *)nodeInfo.get(i);
-        int numberOfDevices = node->devices->getSize();
-        int numberOfEvents = calendarEvents.getSize();
+        if (strcmp(nodeId, node->nodeId) == 0) {
 
-        for (int j = 0; j < numberOfDevices; ++j) {
-          DeviceInfo * device = node->devices->get(j);
-          int triggers = 0;
-          
-          for(int k=0; k < numberOfEvents; ++k) {
-            CalendarEvent * calendarEvent = calendarEvents.get(k);
-            if(calendarEvent->onGoing) {
-              ++triggers;
+          int numberOfDevices = node->devices->getSize();
+          int numberOfEvents = calendarEvents.getSize();
+
+          for (int j = 0; j < numberOfDevices; ++j) {
+            DeviceInfo *device = node->devices->get(j);
+            int triggers = 0;
+            int events = 0;
+            for (int k = 0; k < numberOfEvents; ++k) {
+              CalendarEvent *calendarEvent = calendarEvents.get(k);
+              ++events;
+              if (calendarEvent->onGoing) {
+                ++triggers;
+              }
+            }
+            if (events) {
+              setLocalState(String(device->deviceId), triggers > 0);
             }
           }
-          setLocalState(String(device->deviceId), triggers > 0);
         }
       }
 
@@ -885,6 +896,7 @@ void setup() {
   );
 
   server.on("/", HTTP_GET, handleRoot);
+  server.on("/broadcast", HTTP_GET, handleBroadcastEvents);
   server.on(
     "/", HTTP_POST, [](AsyncWebServerRequest *request) {
       request->redirect("/");
@@ -903,7 +915,7 @@ void loop() {
   display.setTextSize(1);
   display.setTextColor(WHITE);
   display.setCursor(0, 0);
-  display.printf("%s\n%s\n%s\n%s\n", "LoRa Control v1.0", nodeId, timeStr, myIP.c_str());
+  display.printf("%s\n%s\n%s\n%s\n", "LoRa Control v1.1", nodeId, timeStr, myIP.c_str());
   display.display();
 
   delay(1000);  // wait for a second
