@@ -2,7 +2,6 @@
 #include <LoRa.h>
 #include <Wire.h>
 #include <Adafruit_SSD1306.h>
-#include <Arduino_JSON.h>
 #include <Dictionary.h>
 #include <WiFi.h>
 #include "esp_random.h"
@@ -51,6 +50,12 @@ typedef struct {
   bool onGoing;
 } CalendarEvent;
 
+typedef struct {
+  char nodeId[32];    //check RFC 7986
+  char deviceId[32];  //check RFC 7986
+  long captcha;
+  bool value;  
+} DeviceEvent;
 
 typedef struct {
   int packetSize;
@@ -66,6 +71,18 @@ typedef struct {
 } FilePart;
 
 
+typedef struct {
+  char deviceId[32];
+  bool state;
+} DeviceInfo;
+
+typedef struct {
+  char nodeId[32];  //check RFC 7986
+  time_t time;
+  long captcha;
+  List<DeviceInfo*> * devices;
+} NodeInfo;
+
 unsigned int counter = 0;
 ESP32Time rtc(3600);  // offset in seconds GMT+1
 Adafruit_SSD1306 display(OLED_RESET);
@@ -77,7 +94,7 @@ const char *nodeId = "Node2A";
 
 String secret = "fseCxV7BeM";
 long captcha = esp_random();
-Dictionary *nodeInfo = new Dictionary(256);
+List<NodeInfo *> nodeInfo;
 String myIP = "0.0.0.0";
 
 
@@ -103,13 +120,13 @@ boolean relay2Status = true;
 void setLocalState(String deviceId, bool state) {
   Serial.printf("\tsetLocalState(%s=%s)\n", deviceId.c_str(), state ? "true" : "false");
   if (!deviceId.compareTo("r1")) {
-    if(relay1Status != state) {
+    if (relay1Status != state) {
       relay1Status = state;
       digitalWrite(RELAY1_PIN, state ^ INVERT_RELAY ? HIGH : LOW);  // turn the LED on (HIGH is the voltage level)
     }
   }
   if (!deviceId.compareTo("r2")) {
-    if(relay2Status != state) {
+    if (relay2Status != state) {
       relay2Status = state;
       digitalWrite(RELAY2_PIN, state ^ INVERT_RELAY ? HIGH : LOW);  // turn the LED on (HIGH is the voltage level)
     }
@@ -317,8 +334,8 @@ void handleFileUpload(AsyncWebServerRequest *request, String filename, size_t in
   );
 }
 
-char * getStringFromEnum(CalendarRepeatFreq freq){
-  switch(freq){
+char *getStringFromEnum(CalendarRepeatFreq freq) {
+  switch (freq) {
     case CalendarRepeatFreq::DAILY: return "DAILY";
     case CalendarRepeatFreq::HOURLY: return "HOURLY";
     case CalendarRepeatFreq::MINUTELY: return "MINUTELY";
@@ -346,25 +363,23 @@ void handleRoot(AsyncWebServerRequest *request) {
     Serial.printf("/%s/%s/%s\n", remoteNodeId, remoteDeviceId, remoteDeviceValue ? "true" : "false");
 
     if (remoteNodeId.compareTo(nodeId)) {
-
-      char message[256];
-      sprintf(message, "{\"i\":\"%s\",\"c\":%ld,\"d\":\"%s\",\"v\":%s}\0", remoteNodeId, remoteCaptcha, remoteDeviceId, remoteDeviceValue ? "true" : "false");
-      uint8_t messageLength = strlen(message);
+      DeviceEvent event;
+      strcpy(event.nodeId, remoteNodeId.c_str());
+      strcpy(event.deviceId, remoteDeviceId.c_str());
+      event.value = remoteDeviceValue;
+      event.captcha = remoteCaptcha;
 
       uint8_t shaResult[32];
-      calculateHash(message, messageLength, shaResult);
-
-      uint8_t *messageBytes = (uint8_t *)malloc(sizeof(uint8_t) * messageLength);
-      memcpy(messageBytes, message, messageLength);
+      calculateHash(&event, sizeof(DeviceEvent), shaResult); 
 
       // send packet
       LoRa.beginPacket();
       LoRa.write(MESSAGE_TYPE_CONTROL);
-      LoRa.write(messageBytes, messageLength);
+      LoRa.write((uint8_t*) &event, sizeof(DeviceEvent));
       LoRa.write(shaResult, 32);
       LoRa.endPacket();
       LoRa.receive();
-      Serial.printf("SENT: %s\n", message);
+      Serial.printf("SENT: %s\n", event.nodeId);
 
     } else {
       setLocalState(remoteDeviceId, remoteDeviceValue);
@@ -393,28 +408,27 @@ void handleRoot(AsyncWebServerRequest *request) {
   }
 
   html += "<h2>Nodes</h2>";
-  html += "<table><tr><th>NodeId</th><th>Captcha</th><th>Devices</th></tr>";
+  html += "<table><tr><th>NodeId</th><th>Time</th><th>Captcha</th><th>Devices</th></tr>";
 
-  for (int i = 0; i < nodeInfo->count(); ++i) {
-    String key = nodeInfo->key(i);
-    String value = nodeInfo->value(i);
+  for (int i = 0; i < nodeInfo.getSize(); ++i) {
+    NodeInfo *node = nodeInfo.get(i);
 
-    JSONVar myObject = JSON.parse(value);
-    if (JSON.typeof(myObject) == "undefined") {
-      Serial.printf("Parsing input failed!\n");
-      return;
-    }
-    long c = (long)myObject["c"];
-    JSONVar d = (JSONVar)myObject["d"];
+
+    long c = node->captcha;
+
     String dshtml = "";
-    for (int j = 0; j < d.keys().length(); ++j) {
-      String jk = d.keys()[j];
-
-      bool jv = d[jk];
-
-      dshtml += jk + "(" + (jv ? "true" : "false") + ")[" + "<a href='/?n=" + key + "&d=" + jk + "&v=" + (jv ? "false" : "true") + "&c=" + String(c) + "'>switch</a>" + "]<br>";
+    for (int j = 0; j < node->devices->getSize(); ++j) {
+      DeviceInfo *device = node->devices->get(j);
+      Serial.printf("\tdevice(id=%s,value=%d)\n", device->deviceId, device->state);
+      dshtml += String(device->deviceId) + "(" + (device->state ? "true" : "false") + ")[" + "<a href='/?n=" + String(node->nodeId) + "&d=" + String(device->deviceId) + "&v=" + (device->state ? "false" : "true") + "&c=" + String(node->captcha) + "'>switch</a>" + "]<br>";
     }
-    html += "<tr><td>" + key + "</td><td>" + String(c) + "</td><td>" + dshtml + "</td></tr>";
+
+    struct tm *timeinfo;
+    char timeStr[256];
+    timeinfo = gmtime(&node->time);
+    strftime(timeStr, 256, "%d/%m/%Y %H:%M:%S", timeinfo);
+
+    html += "<tr><td>" + String(node->nodeId) + "</td><td>" + String(timeStr) + "</td><td>" + String(node->captcha) + "</td><td>" + dshtml + "</td></tr>";
   }
   html += "</table>";
 
@@ -441,7 +455,7 @@ void handleRoot(AsyncWebServerRequest *request) {
     long loopLength = event->repeat * event->interval;
     long cyclesSinceStart = (time - event->start) / loopLength;
 
-    time_t stripTime =(time - event->start) % loopLength;
+    time_t stripTime = (time - event->start) % loopLength;
     time_t stripStart = 0;
     time_t stripEnd = (event->end - event->start) % loopLength;
 
@@ -509,6 +523,37 @@ void onReceive(int packetSize) {
   );
 }
 
+NodeInfo *getNodeInfo(uint8_t *bytes, int length) {
+  NodeInfo *nodeInfo = (NodeInfo *)malloc(sizeof(NodeInfo));
+  memcpy(nodeInfo, bytes, sizeof(NodeInfo));
+  Serial.printf("\tnode(id=%s,captcha=%d)\n", nodeInfo->nodeId, nodeInfo->captcha);
+  nodeInfo->devices = new List<DeviceInfo*>();
+  for (int i = sizeof(NodeInfo); i < length; i += sizeof(DeviceInfo)) {
+    DeviceInfo *device = (DeviceInfo *)malloc(sizeof(DeviceInfo));
+    memcpy(device, bytes + i, sizeof(DeviceInfo));
+    Serial.printf("\tdevice(id=%s,value=%d)\n", device->deviceId, device->state);
+    nodeInfo->devices->add(device);
+  }
+  
+  return nodeInfo;
+}
+
+void addNodeInfo(NodeInfo * node) {
+  for(int i=0 ; i < nodeInfo.getSize(); ++ i) {
+    NodeInfo * n = nodeInfo.get(i);
+    if(strcmp(node->nodeId, n->nodeId) == 0) {
+      for(int j=0; j<n->devices->getSize(); ++j) {
+        free(n->devices->get(j));
+      }
+      free(n->devices);
+      free(n);
+      nodeInfo.remove(i--);
+    }
+  }
+  nodeInfo.add(node);
+}
+
+
 void messageTask(void *parameter) {
   Data *data = (Data *)parameter;
   int packetSize = data->packetSize;
@@ -538,43 +583,33 @@ void messageTask(void *parameter) {
     if (memcmp(hash, expectedHash, 32) == 0) {
 
       if (type == MESSAGE_TYPE_PING) {
-
-        JSONVar myObject = JSON.parse(message);
-        if (JSON.typeof(myObject) == "undefined") {
-          Serial.println("ERROR: Parsing input failed!");
-        } else {
-          const char *remoteNodeId = (const char *)myObject["i"];
-          if (strcmp(nodeId, remoteNodeId) != 0) {
-            nodeInfo->insert(remoteNodeId, message);
-          }
+        NodeInfo *pingMessage = getNodeInfo(packet+1, packetSize -1 -32);
+        addNodeInfo(pingMessage); 
+     
 #ifndef SERVER
-          if (!haveTime && myObject.hasOwnProperty("t")) {
-            long time = (long)myObject["t"];
-            rtc.setTime(time, 0);
-            haveTime = true;
-          }
+        if (!haveTime && pingMessage->time) {
+          rtc.setTime(pingMessage->time, 0);
+          haveTime = true;
+        }
 #endif
-        }
+
+
+
       } else if (type == MESSAGE_TYPE_CONTROL) {
-        JSONVar myObject = JSON.parse(message);
-        if (JSON.typeof(myObject) == "undefined") {
-          Serial.println("Parsing input failed!");
-        } else {
-          const char *nid = (const char *)myObject["i"];
-          const char *did = (const char *)myObject["d"];
-          bool val = (bool)myObject["v"];
-          long cap = (long)myObject["c"];
-          if (strcmp(nid, nodeId) == 0) {
-            if (cap == captcha) {
-              setLocalState(String(did), val);
-              captcha = esp_random();
-            } else {
-              Serial.println("ERROR: Failed captcha!");
-            }
+        DeviceEvent *event = (DeviceEvent *)malloc(sizeof(DeviceEvent));
+        memcpy(event, packet + 1, sizeof(DeviceEvent));
+
+        if (strcmp(event->nodeId, nodeId) == 0) {
+          if (event->captcha == captcha) {
+            setLocalState(String(event->deviceId), event->value);
+            captcha = esp_random();
           } else {
-            Serial.println("WARN: Wrong recepient!");
+            Serial.println("ERROR: Failed captcha!");
           }
+        } else {
+          Serial.println("WARN: Wrong recepient!");
         }
+        
       } else if (type == MESSAGE_TYPE_EVENT) {
         CalendarEvent *event = (CalendarEvent *)malloc(sizeof(CalendarEvent));
         int index = packet[1];
@@ -628,24 +663,35 @@ void pingTask(void *parameter) {
   char message[256];
 
   for (;;) {  // infinite loop
-    sprintf(message, "{\"i\":\"%s\",\"c\":%ld,\"d\":{\"r1\":%s,\"r2\":%s}", nodeId, captcha, relay1Status ? "true" : "false", relay2Status ? "true" : "false");
-    if (haveTime) {
-      long time = rtc.getEpoch();
-      sprintf(message, "%s,\"t\":%ld}", message, time);
-    }
-    sprintf(message, "%s}\0", message);
-    Serial.printf("Ping=%s\n", message);
-
-
-
-    nodeInfo->insert(nodeId, message);
-
-    uint8_t messageLength = strlen(message);
-    uint8_t shaResult[32];
-    calculateHash(message, messageLength, shaResult);
-
+    uint8_t messageLength = sizeof(NodeInfo) + 2 * sizeof(DeviceInfo);
     uint8_t *messageBytes = (uint8_t *)malloc(sizeof(uint8_t) * messageLength);
-    memcpy(messageBytes, message, messageLength);
+
+    NodeInfo pingMessage;
+    DeviceInfo relay1Message;
+    DeviceInfo relay2Message;
+
+    strcpy(pingMessage.nodeId, nodeId);
+    strcpy(relay1Message.deviceId, "r1");
+    strcpy(relay2Message.deviceId, "r2");
+    relay1Message.state = relay1Status;
+    relay2Message.state = relay2Status;
+    pingMessage.captcha = captcha;
+
+    if (haveTime) {
+      pingMessage.time = rtc.getEpoch();
+    }
+
+    memcpy(messageBytes, &pingMessage, sizeof(NodeInfo));
+    memcpy(messageBytes + sizeof(NodeInfo), &relay1Message, sizeof(DeviceInfo));
+    memcpy(messageBytes + sizeof(NodeInfo) + sizeof(DeviceInfo), &relay2Message, sizeof(DeviceInfo));
+
+    Serial.printf("addNodeInfo()\n");
+
+    addNodeInfo(getNodeInfo(messageBytes, messageLength)); //TODO check repeated pings
+    //Serial.printf("\tmessage='%jd'\n", messageBytes+32);
+
+    uint8_t shaResult[32];
+    calculateHash(messageBytes, messageLength, shaResult);
 
     // send packet
     LoRa.beginPacket();
@@ -711,13 +757,15 @@ void eventSchedulerTask(void *parameter) {
 
     if (xSemaphoreTake(calendarEventsMutex, portMAX_DELAY)) {
       int numberOfEvents = calendarEvents.getSize();
+      List<char *> devicesRunningCurrently;
+
       for (int i = 0; i < numberOfEvents; ++i) {
         CalendarEvent *event = (CalendarEvent *)calendarEvents.get(i);
         Serial.printf("Handling event (uid=%s,node=%s,device=%s,start=%jd,end=%jd,freq=%d,repeat=%jd,count=%d,interval=%d)\n", event->uid, event->nodeId, event->deviceId, event->start, event->end, event->freq, event->repeat, event->count, event->interval);
         time_t loopLength = event->repeat * event->interval;
         time_t cyclesSinceStart = (time - event->start) / loopLength;
 
-        time_t stripTime = (time-event->start) % loopLength;
+        time_t stripTime = (time - event->start) % loopLength;
         time_t stripStart = 0;
         time_t stripEnd = (event->end - event->start) % loopLength;
         Serial.printf("strip(start=%jd,end=%jd,time=%jd,len=%ld,cycles=%ld)\n", stripStart, stripEnd, stripTime, loopLength, cyclesSinceStart);
@@ -726,18 +774,17 @@ void eventSchedulerTask(void *parameter) {
         if (strcmp(nodeId, event->nodeId) == 0) {
           bool evaluation = (stripStart <= stripTime && stripTime < stripEnd) && (event->count == 0 || cyclesSinceStart < event->count);
           event->onGoing = evaluation;
-          setLocalState(String(event->deviceId), evaluation);
-
+          if (evaluation) {
+            devicesRunningCurrently.add(event->deviceId);
+          }
         }
         //Serial.printf("location(nodeId=%s,deviceId=%s)\n", event->nodeId, event->deviceId);
       }
-      for (int i = 0; i < numberOfEvents; ++i) {
-        CalendarEvent *event = (CalendarEvent *)calendarEvents.get(i);
-        if(event->onGoing) {
-            Serial.printf("--- EVENT HAPPENING! %s---\n", event->nodeId);
-        }
+      for (int i = 0; i < devicesRunningCurrently.getSize(); ++i) {
+        char *value = (char *)devicesRunningCurrently.get(i);
+        setLocalState(String(value), true);
       }
-  
+
       xSemaphoreGive(calendarEventsMutex);
     }
     vTaskDelay(1000 / portTICK_PERIOD_MS);
