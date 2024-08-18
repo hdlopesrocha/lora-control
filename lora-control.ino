@@ -54,7 +54,7 @@ typedef struct {
   char nodeId[32];    //check RFC 7986
   char deviceId[32];  //check RFC 7986
   long captcha;
-  bool value;  
+  bool value;
 } DeviceEvent;
 
 typedef struct {
@@ -80,7 +80,7 @@ typedef struct {
   char nodeId[32];  //check RFC 7986
   time_t time;
   long captcha;
-  List<DeviceInfo*> * devices;
+  List<DeviceInfo *> *devices;
 } NodeInfo;
 
 unsigned int counter = 0;
@@ -370,12 +370,12 @@ void handleRoot(AsyncWebServerRequest *request) {
       event.captcha = remoteCaptcha;
 
       uint8_t shaResult[32];
-      calculateHash(&event, sizeof(DeviceEvent), shaResult); 
+      calculateHash(&event, sizeof(DeviceEvent), shaResult);
 
       // send packet
       LoRa.beginPacket();
       LoRa.write(MESSAGE_TYPE_CONTROL);
-      LoRa.write((uint8_t*) &event, sizeof(DeviceEvent));
+      LoRa.write((uint8_t *)&event, sizeof(DeviceEvent));
       LoRa.write(shaResult, 32);
       LoRa.endPacket();
       LoRa.receive();
@@ -435,35 +435,43 @@ void handleRoot(AsyncWebServerRequest *request) {
   html += "<h2>Calendar</h2>";
   html += "<form method=\"post\" enctype=\"multipart/form-data\" action=\"/\">Upload a calendar:<br><input name=\"file\" id=\"file\" type=\"file\" accept=\".ics\"/><br><input type=\"submit\"/></form>";
 
-  html += "<h2>Events</h2>";
-  html += "<table>";
-  html += "<tr><th>uid</th><th>node</th><th>device</th><th>start</th><th>end</th><th>freq</th><th>interval</th><th>repeat</th><th>stripStart</th><th>stripEnd</th><th>stripTime</th></tr>";
 
-  int numberOfEvents = calendarEvents.getSize();
-  for (int i = 0; i < numberOfEvents; ++i) {
-    CalendarEvent *event = (CalendarEvent *)calendarEvents.get(i);
+  {
+    html += "<h2>Schedulled Events</h2>";
+    html += "<table>";
+    html += "<tr><th>state</th><th>uid</th><th>node</th><th>device</th><th>start</th><th>end</th><th>freq</th><th>interval</th><th>repeat</th><th>stripStart</th><th>stripEnd</th><th>stripTime</th></tr>";
+    int numberOfEvents = calendarEvents.getSize();
+    for (int i = 0; i < numberOfEvents; ++i) {
+      CalendarEvent *event = (CalendarEvent *)calendarEvents.get(i);
 
-    struct tm *timeinfo;
+      struct tm *timeinfo;
 
-    char startStr[256];
-    char endStr[256];
-    timeinfo = gmtime(&event->start);
-    strftime(startStr, 256, "%d/%m/%Y %H:%M:%S", timeinfo);
-    timeinfo = gmtime(&event->end);
-    strftime(endStr, 256, "%d/%m/%Y %H:%M:%S", timeinfo);
+      char startStr[256];
+      char endStr[256];
+      timeinfo = gmtime(&event->start);
+      strftime(startStr, 256, "%d/%m/%Y %H:%M:%S", timeinfo);
+      timeinfo = gmtime(&event->end);
+      strftime(endStr, 256, "%d/%m/%Y %H:%M:%S", timeinfo);
 
-    long loopLength = event->repeat * event->interval;
-    long cyclesSinceStart = (time - event->start) / loopLength;
+      long loopLength = event->repeat * event->interval;
+      long cyclesSinceStart = (time - event->start) / loopLength;
 
-    time_t stripTime = (time - event->start) % loopLength;
-    time_t stripStart = 0;
-    time_t stripEnd = (event->end - event->start) % loopLength;
+      time_t stripTime = (time - event->start) % loopLength;
+      time_t stripStart = 0;
+      time_t stripEnd = (event->end - event->start) % loopLength;
 
 
 
-    html += "<tr><td>" + String(event->uid) + "</td><td>" + String(event->nodeId) + "</td><td>" + String(event->deviceId) + "</td><td>" + String(startStr) + "</td><td>" + String(endStr) + "</td><td>" + String(getStringFromEnum(event->freq)) + "</td><td>" + String(event->interval) + "</td><td>" + String(event->repeat) + "</td><td>" + String(stripStart) + "</td><td>" + String(stripEnd) + "</td><td>" + String(stripTime) + "</td></tr>";
+      html += "<tr><td>" + String(event->onGoing ? "RUNNING" : "WAITING")+ "</td><td>" + String(event->uid) + "</td><td>" + String(event->nodeId) + "</td><td>" + String(event->deviceId) + "</td><td>" + String(startStr) + "</td><td>" + String(endStr) + "</td><td>" + String(getStringFromEnum(event->freq)) + "</td><td>" + String(event->interval) + "</td><td>" + String(event->repeat) + "</td><td>" + String(stripStart) + "</td><td>" + String(stripEnd) + "</td><td>" + String(stripTime) + "</td></tr>";
+    }
+    html += "</table>";
   }
-  html += "</table>";
+
+
+ 
+
+
+
 
   html += "</body></html>";
   request->send(200, "text/html", html.c_str());
@@ -527,22 +535,22 @@ NodeInfo *getNodeInfo(uint8_t *bytes, int length) {
   NodeInfo *nodeInfo = (NodeInfo *)malloc(sizeof(NodeInfo));
   memcpy(nodeInfo, bytes, sizeof(NodeInfo));
   Serial.printf("\tnode(id=%s,captcha=%d)\n", nodeInfo->nodeId, nodeInfo->captcha);
-  nodeInfo->devices = new List<DeviceInfo*>();
+  nodeInfo->devices = new List<DeviceInfo *>();
   for (int i = sizeof(NodeInfo); i < length; i += sizeof(DeviceInfo)) {
     DeviceInfo *device = (DeviceInfo *)malloc(sizeof(DeviceInfo));
     memcpy(device, bytes + i, sizeof(DeviceInfo));
     Serial.printf("\tdevice(id=%s,value=%d)\n", device->deviceId, device->state);
     nodeInfo->devices->add(device);
   }
-  
+
   return nodeInfo;
 }
 
-void addNodeInfo(NodeInfo * node) {
-  for(int i=0 ; i < nodeInfo.getSize(); ++ i) {
-    NodeInfo * n = nodeInfo.get(i);
-    if(strcmp(node->nodeId, n->nodeId) == 0) {
-      for(int j=0; j<n->devices->getSize(); ++j) {
+void addNodeInfo(NodeInfo *node) {
+  for (int i = 0; i < nodeInfo.getSize(); ++i) {
+    NodeInfo *n = nodeInfo.get(i);
+    if (strcmp(node->nodeId, n->nodeId) == 0) {
+      for (int j = 0; j < n->devices->getSize(); ++j) {
         free(n->devices->get(j));
       }
       free(n->devices);
@@ -583,9 +591,9 @@ void messageTask(void *parameter) {
     if (memcmp(hash, expectedHash, 32) == 0) {
 
       if (type == MESSAGE_TYPE_PING) {
-        NodeInfo *pingMessage = getNodeInfo(packet+1, packetSize -1 -32);
-        addNodeInfo(pingMessage); 
-     
+        NodeInfo *pingMessage = getNodeInfo(packet + 1, packetSize - 1 - 32);
+        addNodeInfo(pingMessage);
+
 #ifndef SERVER
         if (!haveTime && pingMessage->time) {
           rtc.setTime(pingMessage->time, 0);
@@ -609,7 +617,7 @@ void messageTask(void *parameter) {
         } else {
           Serial.println("WARN: Wrong recepient!");
         }
-        
+
       } else if (type == MESSAGE_TYPE_EVENT) {
         CalendarEvent *event = (CalendarEvent *)malloc(sizeof(CalendarEvent));
         int index = packet[1];
@@ -687,7 +695,7 @@ void pingTask(void *parameter) {
 
     Serial.printf("addNodeInfo()\n");
 
-    addNodeInfo(getNodeInfo(messageBytes, messageLength)); //TODO check repeated pings
+    addNodeInfo(getNodeInfo(messageBytes, messageLength));  //TODO check repeated pings
     //Serial.printf("\tmessage='%jd'\n", messageBytes+32);
 
     uint8_t shaResult[32];
@@ -774,9 +782,6 @@ void eventSchedulerTask(void *parameter) {
         if (strcmp(nodeId, event->nodeId) == 0) {
           bool evaluation = (stripStart <= stripTime && stripTime < stripEnd) && (event->count == 0 || cyclesSinceStart < event->count);
           event->onGoing = evaluation;
-          if (evaluation) {
-            devicesRunningCurrently.add(event->deviceId);
-          }
         }
         //Serial.printf("location(nodeId=%s,deviceId=%s)\n", event->nodeId, event->deviceId);
       }
@@ -784,6 +789,29 @@ void eventSchedulerTask(void *parameter) {
         char *value = (char *)devicesRunningCurrently.get(i);
         setLocalState(String(value), true);
       }
+
+
+      int numberOfNodes = nodeInfo.getSize();
+      for (int i = 0; i < numberOfNodes; ++i) {
+        NodeInfo *node = (NodeInfo *)nodeInfo.get(i);
+        int numberOfDevices = node->devices->getSize();
+        int numberOfEvents = calendarEvents.getSize();
+
+        for (int j = 0; j < numberOfDevices; ++j) {
+          DeviceInfo * device = node->devices->get(j);
+          int triggers = 0;
+          
+          for(int k=0; k < numberOfEvents; ++k) {
+            CalendarEvent * calendarEvent = calendarEvents.get(k);
+            if(calendarEvent->onGoing) {
+              ++triggers;
+            }
+          }
+          setLocalState(String(device->deviceId), triggers > 0);
+        }
+      }
+
+
 
       xSemaphoreGive(calendarEventsMutex);
     }
