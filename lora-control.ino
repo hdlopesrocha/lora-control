@@ -10,7 +10,7 @@
 #include <ESP32Time.h>
 #include <List.hpp>
 
-//#define SERVER 1
+#define SERVER 1
 #define INVERT_RELAY 1
 
 #define SCK 5    // GPIO5  -- SCK
@@ -23,9 +23,13 @@
 #define OLED_RESET 4
 #define RELAY1_PIN 25
 #define RELAY2_PIN 25
-#define MESSAGE_TYPE_PING 1
-#define MESSAGE_TYPE_CONTROL 2
-#define MESSAGE_TYPE_EVENT 3
+
+typedef enum {
+  PING,
+  CONTROL,
+  EVENT
+} MessageType;
+
 
 typedef enum {
   SECONDLY,
@@ -38,9 +42,9 @@ typedef enum {
 } CalendarRepeatFreq;
 
 typedef struct {
-  char uid[48];       //check RFC 7986
-  char nodeId[32];    //check RFC 7986
-  char deviceId[32];  //check RFC 7986
+  char uid[48];      
+  char nodeId[32];   
+  char deviceId[32]; 
   time_t repeat;
   uint8_t count;
   uint8_t interval;
@@ -58,8 +62,8 @@ typedef struct {
 } EventMessage;
 
 typedef struct {
-  char nodeId[32];    //check RFC 7986
-  char deviceId[32];  //check RFC 7986
+  char nodeId[32];    
+  char deviceId[32]; 
   long captcha;
   bool value;
 } DeviceEvent;
@@ -84,14 +88,14 @@ typedef struct {
 } DeviceInfo;
 
 typedef struct {
-  char nodeId[32];  //check RFC 7986
+  char nodeId[32];  
   time_t time;
   long captcha;
   List<DeviceInfo *> *devices;
 } NodeInfo;
 
 unsigned int counter = 0;
-ESP32Time rtc(3600);  // offset in seconds GMT+1
+ESP32Time rtc(0);  // offset in seconds GMT+1
 Adafruit_SSD1306 display(OLED_RESET);
 #ifdef SERVER
 const char *nodeId = "Server";
@@ -108,7 +112,7 @@ String myIP = "0.0.0.0";
 const char *ntpServer = "pool.ntp.org";
 bool haveTime = false;
 const long gmtOffset_sec = 0;
-const int daylightOffset_sec = 3600;
+const int daylightOffset_sec = 0;
 // Replace with your network credentials
 
 
@@ -255,11 +259,11 @@ void handleFileUploadTask(void *parameter) {
           replace_char(value, ';', ' ');
 
           if (nodeStr != NULL) {
-            sscanf(nodeStr, "NODE=%s", calendarEvent->nodeId);  //TODO: Fix did has everything, now it can't contain spaces
+            sscanf(nodeStr, "NODE=%s", calendarEvent->nodeId); 
             Serial.printf("node=%s\n", calendarEvent->nodeId);
           }
           if (deviceStr != NULL) {
-            sscanf(deviceStr, "DEVICE=%s", calendarEvent->deviceId);  //TODO: Fix did has everything, now it can't contain spaces
+            sscanf(deviceStr, "DEVICE=%s", calendarEvent->deviceId);  
             Serial.printf("device=%s\n", calendarEvent->deviceId);
           }
         } else if (startsWith(fileLine, "RRULE") && calendarEvent != NULL) {
@@ -354,6 +358,17 @@ char *getStringFromEnum(CalendarRepeatFreq freq) {
   }
 }
 
+
+void handleSynchronizeTime(AsyncWebServerRequest *request) {
+  AsyncWebParameter *timeParam = request->getParam("t", false, false);
+  if(timeParam != NULL) {
+    time_t time = timeParam->value().toInt();
+    rtc.setTime(time, 0);
+    haveTime = true;
+  }
+  request->redirect("/");
+}
+
 void handleBroadcastEvents(AsyncWebServerRequest *request) {
   pingCalendarEventsTask();
   request->redirect("/");
@@ -406,7 +421,7 @@ void handleChangeNodeInfo(AsyncWebServerRequest *request) {
 
       // send packet
       LoRa.beginPacket();
-      LoRa.write(MESSAGE_TYPE_CONTROL);
+      LoRa.write(MessageType::CONTROL);
       LoRa.write((uint8_t *)&event, sizeof(DeviceEvent));
       LoRa.write(shaResult, 32);
       LoRa.endPacket();
@@ -426,6 +441,8 @@ void handleRoot(AsyncWebServerRequest *request) {
 
   String html = "";
   html += "<html><head><style>table, th, td {border: 1px solid;}</style></head><body>";
+  html += "<script>function syncTime() {var now = new Date();let xhr = new XMLHttpRequest();xhr.open(\"GET\", \"/time?t=\"+Math.floor(now.getTime()/1000));xhr.send();}</script>";
+
   html += "<h1>" + String(nodeId) + "</h1>";
   html += "<h2>Time</h2>";
 
@@ -434,7 +451,7 @@ void handleRoot(AsyncWebServerRequest *request) {
 
     struct tm timeinfo;
     getLocalTime(&timeinfo);
-    timeinfo.tm_isdst = 0;
+    //timeinfo.tm_isdst = 0;
     time = mktime(&timeinfo);
 
     char timeStr[256];
@@ -444,6 +461,7 @@ void handleRoot(AsyncWebServerRequest *request) {
     time = 0;
     html += "Time not synchronized";
   }
+  html += "<br><button onclick=\"syncTime()\">Synchronize with browser</button>";
 
   html += "<h2>Nodes</h2>";
   html += "<table><tr><th>NodeId</th><th>Time</th><th>Captcha</th><th>Devices</th></tr>";
@@ -626,7 +644,7 @@ void messageTask(void *parameter) {
 
     if (memcmp(hash, expectedHash, 32) == 0) {
 
-      if (type == MESSAGE_TYPE_PING) {
+      if (type == MessageType::PING) {
         NodeInfo *pingMessage = getNodeInfo(packet + 1, packetSize - 1 - 32);
         addNodeInfo(pingMessage);
 
@@ -639,7 +657,7 @@ void messageTask(void *parameter) {
 
 
 
-      } else if (type == MESSAGE_TYPE_CONTROL) {
+      } else if (type == MessageType::CONTROL) {
         DeviceEvent *event = (DeviceEvent *)malloc(sizeof(DeviceEvent));
         memcpy(event, packet + 1, sizeof(DeviceEvent));
 
@@ -654,7 +672,7 @@ void messageTask(void *parameter) {
           Serial.println("WARN: Wrong recepient!");
         }
 
-      } else if (type == MESSAGE_TYPE_EVENT) {
+      } else if (type == MessageType::EVENT) {
         EventMessage message;
 
         CalendarEvent *event = (CalendarEvent *)malloc(sizeof(CalendarEvent));
@@ -713,7 +731,7 @@ void pingNodeInfoTask() {
 
   // send packet
   LoRa.beginPacket();
-  LoRa.write(MESSAGE_TYPE_PING);
+  LoRa.write(MessageType::PING);
   LoRa.write(messageBytes, messageLength);
   LoRa.write(shaResult, 32);
   LoRa.endPacket();
@@ -729,7 +747,7 @@ void pingCalendarEventsTask() {
     for (int i = 0; i < numberOfEvents; ++i) {
       CalendarEvent *event = (CalendarEvent *)calendarEvents.get(i);
       LoRa.beginPacket();
-      LoRa.write(MESSAGE_TYPE_EVENT);
+      LoRa.write(MessageType::EVENT);
       EventMessage message;
       message.index = (uint8_t)i;
       message.event = *event;
@@ -804,7 +822,7 @@ void eventSchedulerTask(void *parameter) {
   for (;;) {  // infinite loop
     struct tm timeinfo;
     getLocalTime(&timeinfo);
-    timeinfo.tm_isdst = 0;
+    //timeinfo.tm_isdst = 0;
 
     time_t time = mktime(&timeinfo);
     Serial.printf("eventSchedulerTask %jd\n", time);
@@ -939,6 +957,7 @@ void setup() {
   server.on("/broadcast", HTTP_GET, handleBroadcastEvents);
   server.on("/calendar", HTTP_GET, handleChangeCalendarEvent);
   server.on("/node", HTTP_GET, handleChangeNodeInfo);
+  server.on("/time", HTTP_GET, handleSynchronizeTime);
 
   server.on(
     "/", HTTP_POST, [](AsyncWebServerRequest *request) {
