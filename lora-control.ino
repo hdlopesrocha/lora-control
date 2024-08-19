@@ -10,7 +10,7 @@
 #include <ESP32Time.h>
 #include <List.hpp>
 
-#define SERVER 1
+//#define SERVER 1
 #define INVERT_RELAY 1
 
 #define SCK 5    // GPIO5  -- SCK
@@ -48,6 +48,7 @@ typedef struct {
   time_t end;
   CalendarRepeatFreq freq;
   bool onGoing;
+  bool transition;
   bool active;
 } CalendarEvent;
 
@@ -124,7 +125,7 @@ boolean relay1Status = true;
 boolean relay2Status = true;
 
 void setLocalState(String deviceId, bool state) {
-  //Serial.printf("\tsetLocalState(%s=%s)\n", deviceId.c_str(), state ? "true" : "false");
+  Serial.printf("\tsetLocalState(%s=%s)\n", deviceId.c_str(), state ? "true" : "false");
   if (!deviceId.compareTo("r1")) {
     if (relay1Status != state) {
       relay1Status = state;
@@ -233,6 +234,7 @@ void handleFileUploadTask(void *parameter) {
           calendarEvent->interval = 1;
           calendarEvent->onGoing = false;
           calendarEvent->active = true;
+          calendarEvent->transition = false;
           Serial.printf("Ok!\n");
         } else if (startsWith(fileLine, "END:VEVENT") && calendarEvent != NULL) {
           Serial.printf("Event(uid=%s,node=%s,device=%s,start=%jd,end=%jd,freq=%d,repeat=%jd,count=%d,interval=%d)\n", calendarEvent->uid, calendarEvent->nodeId, calendarEvent->deviceId, calendarEvent->start, calendarEvent->end, calendarEvent->freq, calendarEvent->repeat, calendarEvent->count, calendarEvent->interval);
@@ -353,30 +355,35 @@ char *getStringFromEnum(CalendarRepeatFreq freq) {
 }
 
 void handleBroadcastEvents(AsyncWebServerRequest *request) {
-  pingEventsTask();
+  pingCalendarEventsTask();
   request->redirect("/");
 }
 
 void handleChangeCalendarEvent(AsyncWebServerRequest *request) {
   AsyncWebParameter *idParam = request->getParam("id", false, false);
   AsyncWebParameter *stateParam = request->getParam("active", false, false);
-  String eventId = idParam->value();
-  int state = stateParam->value().toInt();
-  for (int i = 0; i < calendarEvents.getSize(); ++i) {
-    CalendarEvent *event = calendarEvents.get(i);
-    if (strcmp(event->uid, eventId.c_str()) == 0) {
-      event->active = state ? true : false;
+
+  if (idParam != NULL && stateParam != NULL) {
+    String eventId = idParam->value();
+    int state = stateParam->value().toInt();
+    for (int i = 0; i < calendarEvents.getSize(); ++i) {
+      CalendarEvent *event = calendarEvents.get(i);
+      if (strcmp(event->uid, eventId.c_str()) == 0) {
+        event->active = state ? true : false;
+      }
     }
   }
-  pingEventsTask();
+  pingCalendarEventsTask();
   request->redirect("/");
 }
 
-void handleRoot(AsyncWebServerRequest *request) {
+void handleChangeNodeInfo(AsyncWebServerRequest *request) {
   AsyncWebParameter *n = request->getParam("n", false, false);
   AsyncWebParameter *d = request->getParam("d", false, false);
   AsyncWebParameter *v = request->getParam("v", false, false);
   AsyncWebParameter *c = request->getParam("c", false, false);
+
+
 
   if (n != NULL && d != NULL && v != NULL && c != NULL) {
     String remoteNodeId = n->value();
@@ -410,6 +417,12 @@ void handleRoot(AsyncWebServerRequest *request) {
       setLocalState(remoteDeviceId, remoteDeviceValue);
     }
   }
+  pingNodeInfoTask();
+  request->redirect("/");
+}
+
+void handleRoot(AsyncWebServerRequest *request) {
+
 
   String html = "";
   html += "<html><head><style>table, th, td {border: 1px solid;}</style></head><body>";
@@ -445,7 +458,7 @@ void handleRoot(AsyncWebServerRequest *request) {
     for (int j = 0; j < node->devices->getSize(); ++j) {
       DeviceInfo *device = node->devices->get(j);
       Serial.printf("\tdevice(id=%s,value=%d)\n", device->deviceId, device->state);
-      dshtml += String(device->deviceId) + "(" + (device->state ? "true" : "false") + ")[" + "<a href='/?n=" + String(node->nodeId) + "&d=" + String(device->deviceId) + "&v=" + (device->state ? "false" : "true") + "&c=" + String(node->captcha) + "'>switch</a>" + "]<br>";
+      dshtml += String(device->deviceId) + "(" + (device->state ? "true" : "false") + ")[" + "<a href='/node?n=" + String(node->nodeId) + "&d=" + String(device->deviceId) + "&v=" + (device->state ? "false" : "true") + "&c=" + String(node->captcha) + "'>switch</a>" + "]<br>";
     }
 
     struct tm *timeinfo;
@@ -495,12 +508,6 @@ void handleRoot(AsyncWebServerRequest *request) {
     html += "</table>";
     html += "<a href=\"/broadcast\"><button>Broadcast events</button></a>";
   }
-
-
-
-
-
-
 
   html += "</body></html>";
   request->send(200, "text/html", html.c_str());
@@ -603,7 +610,7 @@ void messageTask(void *parameter) {
 
     uint8_t messageSize = packetSize - 32 - 1;
     char *message = (char *)&packet[1];
-    Serial.printf("\tmessage='%.*x'\n", messageSize, message);
+    //Serial.printf("\tmessage='%.*x'\n", messageSize, message);
 
     uint8_t hash[32];
     uint8_t expectedHash[32];
@@ -673,7 +680,50 @@ void messageTask(void *parameter) {
   vTaskDelete(NULL);
 }
 
-void pingEventsTask() {
+void pingNodeInfoTask() {
+  uint8_t messageLength = sizeof(NodeInfo) + 2 * sizeof(DeviceInfo);
+  uint8_t *messageBytes = (uint8_t *)malloc(sizeof(uint8_t) * messageLength);
+
+  NodeInfo pingMessage;
+  DeviceInfo relay1Message;
+  DeviceInfo relay2Message;
+
+  strcpy(pingMessage.nodeId, nodeId);
+  strcpy(relay1Message.deviceId, "r1");
+  strcpy(relay2Message.deviceId, "r2");
+  relay1Message.state = relay1Status;
+  relay2Message.state = relay2Status;
+  pingMessage.captcha = captcha;
+
+  if (haveTime) {
+    pingMessage.time = rtc.getEpoch();
+  }
+
+  memcpy(messageBytes, &pingMessage, sizeof(NodeInfo));
+  memcpy(messageBytes + sizeof(NodeInfo), &relay1Message, sizeof(DeviceInfo));
+  memcpy(messageBytes + sizeof(NodeInfo) + sizeof(DeviceInfo), &relay2Message, sizeof(DeviceInfo));
+
+  Serial.printf("addNodeInfo()\n");
+
+  addNodeInfo(getNodeInfo(messageBytes, messageLength));  //TODO check repeated pings
+  //Serial.printf("\tmessage='%jd'\n", messageBytes+32);
+
+  uint8_t shaResult[32];
+  calculateHash(messageBytes, messageLength, shaResult);
+
+  // send packet
+  LoRa.beginPacket();
+  LoRa.write(MESSAGE_TYPE_PING);
+  LoRa.write(messageBytes, messageLength);
+  LoRa.write(shaResult, 32);
+  LoRa.endPacket();
+  LoRa.receive();
+
+  free(messageBytes);
+}
+
+
+void pingCalendarEventsTask() {
   if (xSemaphoreTake(calendarEventsMutex, portMAX_DELAY)) {
     int numberOfEvents = calendarEvents.getSize();
     for (int i = 0; i < numberOfEvents; ++i) {
@@ -692,6 +742,7 @@ void pingEventsTask() {
       LoRa.write(shaResult, 32);
       LoRa.endPacket();
     }
+    LoRa.receive();
     xSemaphoreGive(calendarEventsMutex);
   }
 }
@@ -700,48 +751,12 @@ void pingTask(void *parameter) {
   char message[256];
 
   for (;;) {  // infinite loop
-    uint8_t messageLength = sizeof(NodeInfo) + 2 * sizeof(DeviceInfo);
-    uint8_t *messageBytes = (uint8_t *)malloc(sizeof(uint8_t) * messageLength);
 
-    NodeInfo pingMessage;
-    DeviceInfo relay1Message;
-    DeviceInfo relay2Message;
-
-    strcpy(pingMessage.nodeId, nodeId);
-    strcpy(relay1Message.deviceId, "r1");
-    strcpy(relay2Message.deviceId, "r2");
-    relay1Message.state = relay1Status;
-    relay2Message.state = relay2Status;
-    pingMessage.captcha = captcha;
-
-    if (haveTime) {
-      pingMessage.time = rtc.getEpoch();
-    }
-
-    memcpy(messageBytes, &pingMessage, sizeof(NodeInfo));
-    memcpy(messageBytes + sizeof(NodeInfo), &relay1Message, sizeof(DeviceInfo));
-    memcpy(messageBytes + sizeof(NodeInfo) + sizeof(DeviceInfo), &relay2Message, sizeof(DeviceInfo));
-
-    Serial.printf("addNodeInfo()\n");
-
-    addNodeInfo(getNodeInfo(messageBytes, messageLength));  //TODO check repeated pings
-    //Serial.printf("\tmessage='%jd'\n", messageBytes+32);
-
-    uint8_t shaResult[32];
-    calculateHash(messageBytes, messageLength, shaResult);
-
-    // send packet
-    LoRa.beginPacket();
-    LoRa.write(MESSAGE_TYPE_PING);
-    LoRa.write(messageBytes, messageLength);
-    LoRa.write(shaResult, 32);
-    LoRa.endPacket();
+    pingNodeInfoTask();
 #ifdef SERVER
-    pingEventsTask();
+    pingCalendarEventsTask();
 #endif
-    LoRa.receive();
 
-    free(messageBytes);
     // Pause the task again for 500ms
     vTaskDelay(10000 / portTICK_PERIOD_MS);
   }
@@ -809,6 +824,7 @@ void eventSchedulerTask(void *parameter) {
         //Serial.printf("strip(start=%jd,end=%jd,time=%jd,len=%ld,cycles=%ld)\n", stripStart, stripEnd, stripTime, loopLength, cyclesSinceStart);
 
         bool evaluation = (stripStart <= stripTime && stripTime < stripEnd) && (event->count == 0 || cyclesSinceStart < event->count);
+        event->transition = evaluation != event->onGoing;
         event->onGoing = evaluation;
         //Serial.printf("location(nodeId=%s,deviceId=%s)\n", event->nodeId, event->deviceId);
       }
@@ -826,17 +842,20 @@ void eventSchedulerTask(void *parameter) {
           for (int j = 0; j < numberOfDevices; ++j) {
             DeviceInfo *device = node->devices->get(j);
             int triggers = 0;
-            int events = 0;
+            int transitions = 0;
+
             for (int k = 0; k < numberOfEvents; ++k) {
               CalendarEvent *calendarEvent = calendarEvents.get(k);
               if (calendarEvent->active) {
-                ++events;
                 if (calendarEvent->onGoing) {
                   ++triggers;
                 }
+                if(calendarEvent->transition) {
+                  ++transitions;
+                }
               }
             }
-            if (events) {
+            if (transitions) {
               setLocalState(String(device->deviceId), triggers > 0);
             }
           }
@@ -919,9 +938,11 @@ void setup() {
   server.on("/", HTTP_GET, handleRoot);
   server.on("/broadcast", HTTP_GET, handleBroadcastEvents);
   server.on("/calendar", HTTP_GET, handleChangeCalendarEvent);
+  server.on("/node", HTTP_GET, handleChangeNodeInfo);
+
   server.on(
     "/", HTTP_POST, [](AsyncWebServerRequest *request) {
-      pingEventsTask();
+      pingCalendarEventsTask();
       request->redirect("/");
     },
     handleFileUpload);
