@@ -71,7 +71,7 @@ typedef struct {
 typedef struct {
   int packetSize;
   uint8_t *packet;
-} Data;
+} PacketData;
 
 typedef struct {
   char filename[128];
@@ -80,7 +80,6 @@ typedef struct {
   size_t len;
   bool isFinal;
 } FilePart;
-
 
 typedef struct {
   char deviceId[32];
@@ -91,6 +90,9 @@ typedef struct {
   char nodeId[32];  
   time_t time;
   long captcha;
+  float latitude;
+  float longitude;
+  bool hasGPS;
   List<DeviceInfo *> *devices;
 } NodeInfo;
 
@@ -117,7 +119,7 @@ const int daylightOffset_sec = 0;
 
 
 #ifdef SERVER
-const char *ssid = "extension2.4G";
+const char *ssid = "exterior2.4G";
 const char *password = "goodlife";
 #else
 const char *ssid = nodeId;
@@ -328,7 +330,7 @@ void handleFileUpload(AsyncWebServerRequest *request, String filename, size_t in
   FilePart *filePart = new FilePart();
   strcpy(filePart->filename, filename.c_str());
   filePart->index = index;
-  filePart->data = (uint8_t *)malloc(sizeof(uint8_t) * len);
+  filePart->data = new uint8_t[len];
   filePart->len = len;
   filePart->isFinal = isFinal;
 
@@ -478,7 +480,11 @@ void handleRoot(AsyncWebServerRequest *request) {
       Serial.printf("\tdevice(id=%s,value=%d)\n", device->deviceId, device->state);
       dshtml += String(device->deviceId) + "(" + (device->state ? "true" : "false") + ")[" + "<a href='/node?n=" + String(node->nodeId) + "&d=" + String(device->deviceId) + "&v=" + (device->state ? "false" : "true") + "&c=" + String(node->captcha) + "'>switch</a>" + "]<br>";
     }
-
+    if(node->hasGPS) {
+     dshtml += "GPS(lat=" + String(node->latitude, 6) + ",lon=" + String(node->longitude, 6) +  ")[<a href=\"https://www.google.com/maps/place/"+String(node->latitude, 6) +"+" + String(node->longitude, 6) + "/@"+String(node->latitude, 6)+","+String(node->longitude, 6)+",700m\">map</a>]<br>";
+    }
+   
+   
     struct tm *timeinfo;
     char timeStr[256];
     timeinfo = gmtime(&node->time);
@@ -533,7 +539,7 @@ void handleRoot(AsyncWebServerRequest *request) {
 
 void calculateHash(void *payload, size_t len, uint8_t result[32]) {
   size_t lenSecret = secret.length();
-  char *payloadPlusSecret = (char *)malloc(sizeof(char) * (len + lenSecret));
+  char *payloadPlusSecret = new char[len + lenSecret];
   memcpy(payloadPlusSecret, payload, len);
   memcpy(payloadPlusSecret + len, secret.c_str(), lenSecret);
 
@@ -566,12 +572,12 @@ void hashToString(uint8_t hash[32], char str[64]) {
 
 void onReceive(int packetSize) {
   // received a packet
-  uint8_t *packet = (uint8_t *)malloc(sizeof(uint8_t) * (packetSize));
+  uint8_t *packet = new uint8_t[packetSize];
   // read packet
   for (int i = 0; i < packetSize; i++) {
     packet[i] = (uint8_t)LoRa.read();
   }
-  Data *data = (Data *)malloc(sizeof(Data));
+  PacketData *data = new PacketData();
   data->packet = packet;
   data->packetSize = packetSize;
 
@@ -586,12 +592,12 @@ void onReceive(int packetSize) {
 }
 
 NodeInfo *getNodeInfo(uint8_t *bytes, int length) {
-  NodeInfo *nodeInfo = (NodeInfo *)malloc(sizeof(NodeInfo));
+  NodeInfo *nodeInfo = new NodeInfo();
   memcpy(nodeInfo, bytes, sizeof(NodeInfo));
   Serial.printf("\tnode(id=%s,captcha=%d)\n", nodeInfo->nodeId, nodeInfo->captcha);
   nodeInfo->devices = new List<DeviceInfo *>();
   for (int i = sizeof(NodeInfo); i < length; i += sizeof(DeviceInfo)) {
-    DeviceInfo *device = (DeviceInfo *)malloc(sizeof(DeviceInfo));
+    DeviceInfo *device = new DeviceInfo();
     memcpy(device, bytes + i, sizeof(DeviceInfo));
     Serial.printf("\tdevice(id=%s,value=%d)\n", device->deviceId, device->state);
     nodeInfo->devices->add(device);
@@ -617,7 +623,7 @@ void addNodeInfo(NodeInfo *node) {
 
 
 void messageTask(void *parameter) {
-  Data *data = (Data *)parameter;
+  PacketData *data = (PacketData *)parameter;
   int packetSize = data->packetSize;
   uint8_t *packet = data->packet;
   free(data);
@@ -658,7 +664,7 @@ void messageTask(void *parameter) {
 
 
       } else if (type == MessageType::CONTROL) {
-        DeviceEvent *event = (DeviceEvent *)malloc(sizeof(DeviceEvent));
+        DeviceEvent *event = new DeviceEvent();
         memcpy(event, packet + 1, sizeof(DeviceEvent));
 
         if (strcmp(event->nodeId, nodeId) == 0) {
@@ -675,7 +681,7 @@ void messageTask(void *parameter) {
       } else if (type == MessageType::EVENT) {
         EventMessage message;
 
-        CalendarEvent *event = (CalendarEvent *)malloc(sizeof(CalendarEvent));
+        CalendarEvent *event = new CalendarEvent();
         int index = packet[1];
         if (index == 0) {
           cleanCalendarEvents();
@@ -700,7 +706,7 @@ void messageTask(void *parameter) {
 
 void pingNodeInfoTask() {
   uint8_t messageLength = sizeof(NodeInfo) + 2 * sizeof(DeviceInfo);
-  uint8_t *messageBytes = (uint8_t *)malloc(sizeof(uint8_t) * messageLength);
+  uint8_t *messageBytes = new uint8_t[messageLength];
 
   NodeInfo pingMessage;
   DeviceInfo relay1Message;
@@ -712,6 +718,16 @@ void pingNodeInfoTask() {
   relay1Message.state = relay1Status;
   relay2Message.state = relay2Status;
   pingMessage.captcha = captcha;
+  #ifdef SERVER
+  pingMessage.hasGPS = true;
+  pingMessage.latitude = 39.944363;
+  pingMessage.longitude = -7.489501;
+  #else
+  pingMessage.hasGPS = false;
+  pingMessage.latitude = 0;
+  pingMessage.longitude = 0;
+  #endif
+
 
   if (haveTime) {
     pingMessage.time = rtc.getEpoch();
@@ -776,7 +792,7 @@ void pingTask(void *parameter) {
 #endif
 
     // Pause the task again for 500ms
-    vTaskDelay(10000 / portTICK_PERIOD_MS);
+    vTaskDelay(5000 / portTICK_PERIOD_MS);
   }
 }
 
@@ -899,12 +915,10 @@ void setup() {
 
   Serial.println("init ok");
   display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
-  display.setTextSize(1);
-  display.setTextColor(WHITE);
-  display.setCursor(0, 0);
-  display.clearDisplay();
-  display.printf("setup...\n");
-  display.display();
+  
+
+
+    displayPage(0);
 
 
   SPI.begin(SCK, MISO, MOSI, SS);
@@ -968,18 +982,31 @@ void setup() {
   server.begin();
 }
 
-void loop() {
-  struct tm timeinfo;
-  char timeStr[256];
-  getLocalTime(&timeinfo);
-  strftime(timeStr, sizeof(timeStr), "%d/%m/%Y %H:%M:%S", &timeinfo);
-
+void displayPage(int index) {
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(WHITE);
   display.setCursor(0, 0);
-  display.printf("%s\n%s\n%s\n%s\n", "LoRa Control v1.1", nodeId, timeStr, myIP.c_str());
-  display.display();
 
+  switch(index){
+    case 0 :
+      display.printf("setup...\n");
+    break;
+    case 1 :
+      struct tm timeinfo;
+      char timeStr[256];
+      getLocalTime(&timeinfo);
+      strftime(timeStr, sizeof(timeStr), "%d/%m/%Y %H:%M:%S", &timeinfo);
+      display.printf("%s\n%s\n%s\n%s\n", "LoRa Control v1.2", nodeId, timeStr, myIP.c_str());
+    break;
+  }
+  display.display();
+}
+
+
+
+void loop() {
+
+  displayPage(1);
   delay(1000);  // wait for a second
 }
